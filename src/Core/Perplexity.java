@@ -18,25 +18,23 @@ public class Perplexity {
     private int[] doc_length;
     private int total_word;
     private int D, V, mD, K;
+    private double doc_percent;
 
     private Map<String, Integer> wordmap;
 
-    public Perplexity(int K, Map<String, Integer> wordMap, String thetaPath, String phiPath, String trainsetPath) {
+    public Perplexity(int K, Map<String, Integer> wordMap, String thetaPath, String phiPath, String trainsetPath, double doc_percent) {
         this.thetaPath = thetaPath;
         this.phiPath = phiPath;
         this.trainsetPath = trainsetPath;
         this.wordmap = wordMap;
+        this.doc_percent = doc_percent;
         this.K = K;
         D = 0;
         V = wordMap.size();
         total_word = 0;
     }
 
-    public void setPhiPath(String phiPath) {
-        this.phiPath = phiPath;
-    }
-
-    private void readFromFile(double[][] para, String path) throws Exception {
+    static void readFromFile(double[][] para, String path) throws Exception {
         BufferedReader input = new BufferedReader(new InputStreamReader(new FileInputStream(new File(path))));
         Scanner scanner = new Scanner(input);
         int _no = 0;
@@ -69,6 +67,8 @@ public class Perplexity {
         while(scanner.hasNextLine()) {
             String[] word_temp = scanner.nextLine().split(" ");
             doc_length[doc_no] = word_temp.length - 1;
+
+            //total_word += Math.floor(doc_length[doc_no] * doc_percent);
             total_word += doc_length[doc_no];
             for(int j = 1; j < word_temp.length; j ++)
                 word[doc_no][j - 1] = wordmap.get(word_temp[j]);
@@ -78,10 +78,12 @@ public class Perplexity {
         scanner.close();
     }
 
-    public double evaluatePerplexity(double doc_percent) {
+    public double evaluatePerplexity() {
         double log_sum = 0;
         for(int i = 0; i < D; i ++) {
-            for(int j = (int) Math.floor(doc_length[i] * doc_percent); j < doc_length[i]; j ++) {
+
+            //for(int j = (int) Math.floor(doc_length[i] * doc_percent); j < doc_length[i]; j ++) {
+            for(int j = 0; j < doc_length[i]; j ++) {
                 double temp_ = 0;
                 for(int k = 0; k < K; k ++) {
                     temp_ += theta[i][k] * phi[k][word[i][j] - 1];

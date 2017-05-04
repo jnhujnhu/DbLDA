@@ -33,6 +33,8 @@ public class DbLDA {
     private double[] mean_nkd;
     private double convergeThreshold = 0.000001;
 
+    private double[][] Phi = null;
+
     public DbLDA(double alpha, double beta, double sigma, int K, int sliceLen, String outputDir) {
         this.Alpha = alpha;
         this.Beta = beta;
@@ -54,6 +56,11 @@ public class DbLDA {
             wordMap.put(temp[0], Integer.parseInt(temp[1]));
         }
         scanner.close();
+    }
+
+    public void givenPhi(String phiPath) throws Exception {
+        Phi = new double[K][V];
+        Perplexity.readFromFile(Phi, phiPath);
     }
 
     public void initParametersForVU(String DataDir, int first_timeslice, double doc_percent) throws Exception {
@@ -79,7 +86,7 @@ public class DbLDA {
         word = new int[S][mD][mN];
         doc_word_slice = new int[S][mD + 1];
         mean_nkd = new double[K];
-        mean_nkw = new double[K][V + 1];
+        mean_nkw = new double[K][V];
 
         //init doc matrix
         while(scanner.hasNextLine()) {
@@ -104,7 +111,7 @@ public class DbLDA {
                 theta[k0] = Math.log(theta[k0]);
             for(int d = 0; d < doc_word_slice[s][0]; d ++) {
                 //init zeta
-                zeta[s][d] = 0.1;
+                zeta[s][d] = new Random().nextDouble() * 0.1 + 0.1001;
                 double[] b_sigma = new double[K];
                 for(int k2 = 0; k2 < K; k2 ++) {
                     b_sigma[k2] = Sigma;
@@ -127,7 +134,7 @@ public class DbLDA {
                     for(int k = 0; k < K; k ++) {
                         gamma[s][d][n][k] = Math.exp(gamma[s][d][n][k]) / gamma_norm;
                         mean_nkd[k] += gamma[s][d][n][k];
-                        mean_nkw[k][word[s][d][n]] += gamma[s][d][n][k];
+                        mean_nkw[k][word[s][d][n] - 1] += gamma[s][d][n][k];
                     }
                 }
             }
@@ -138,12 +145,13 @@ public class DbLDA {
         if(wsdn == 0)
             return mean_nkd[k] - gamma[ex_s][ex_d][ex_n][k];
         else
-            return mean_nkw[k][wsdn] - gamma[ex_s][ex_d][ex_n][k];
+            return mean_nkw[k][wsdn - 1] - gamma[ex_s][ex_d][ex_n][k];
     }
 
     public boolean iterateVariationalUpdate() throws Exception {
         iter_No ++;
-        double[][] prev_phi = computePhi();
+        //double[][] prev_phi = computePhi();
+        double prev_ELBO = evaluate(null);
         for(int i = 0; i < S; i ++)
             for(int j = 0;j < doc_word_slice[i][0]; j ++) {
                 double[] sum_gamma = new double[K];
@@ -154,8 +162,14 @@ public class DbLDA {
 
                     for (int k = 0; k < K; k ++) {
                         prev_gamma[k] = gamma[i][j][n][k];
-                        gamma[i][j][n][k] = (Beta + mean_count_gamma(i, j, n, k, word[i][j][n])) * Math.exp(mu[i][j][k])
-                                / (V * Beta + mean_count_gamma(i, j, n, k, 0));
+                        if(Phi == null) {
+                            gamma[i][j][n][k] = (Beta + mean_count_gamma(i, j, n, k, word[i][j][n])) * Math.exp(mu[i][j][k])
+                                    / (V * Beta + mean_count_gamma(i, j, n, k, 0));
+                        }
+                        else {
+                            assert Phi != null;
+                            gamma[i][j][n][k] =  Phi[k][word[i][j][n] - 1] * Math.exp(mu[i][j][k]);
+                        }
                         norm += gamma[i][j][n][k];
                     }
                     ErrorHandler.catchNaNError(K, gamma[i][j][n], "Gamma");
@@ -164,7 +178,7 @@ public class DbLDA {
                         gamma[i][j][n][k] /= norm;
                         sum_gamma[k] += gamma[i][j][n][k];
                         //maintain mean_nkw mean_nkd
-                        mean_nkw[k][word[i][j][n]] += gamma[i][j][n][k] - prev_gamma[k];
+                        mean_nkw[k][word[i][j][n] - 1] += gamma[i][j][n][k] - prev_gamma[k];
                         mean_nkd[k] += gamma[i][j][n][k] - prev_gamma[k];
                     }
                 }
@@ -173,6 +187,8 @@ public class DbLDA {
                 for(int k = 0; k < K; k ++) {
                     mu[i][j][k] = Math.log(zeta[i][j] / (double) doc_word_slice[i][j + 1] * ((Alpha - 1) + sum_gamma[k]))
                             - sigma[i][j][k] / 2.0;
+
+                    //-Infinity Error
                     if (mu[i][j][k] == Double.NEGATIVE_INFINITY) {
                         System.out.format("zeta[i][j]:%.10f doc_word_slice:%d sum_gamma:%.10f sigma:%.10f", zeta[i][j], doc_word_slice[i][j + 1]
                                 , sum_gamma[k], sigma[i][j][k]);
@@ -196,11 +212,12 @@ public class DbLDA {
                 ErrorHandler.catchNaNError(doc_word_slice[i][0], zeta[i], "Zeta");
             }
 
-        double diff = evaluate(prev_phi);
-        System.out.println("Iterating... No: " + iter_No + "  with diff on Phi: " + Double.toString(diff));
+        double diff = evaluate(null) - prev_ELBO;
+        System.out.println("Iterating... No: " + iter_No + "  with diff on ELBO: " + Double.toString(diff));
 
         //store phi
-        //storePhi();
+        storePhi();
+        storeThetap_normed();
         if(iter_No == 500) {
             //store thetap
             storeThetap_normed();
@@ -220,13 +237,13 @@ public class DbLDA {
     }
 
     private void storeThetap_normed() throws Exception {
-        PrintWriter writer = new PrintWriter(outputDir + "model.thetap", "UTF-8");
+        PrintWriter writer = new PrintWriter(outputDir + "model_iter_" + iter_No + ".thetap", "UTF-8");
             for(int s = 0; s < S; s ++)
                 for(int d = 0; d < doc_word_slice[s][0]; d ++) {
                     double sum = 0;
-                    for (int k = 0; k < K; k ++)
+                    for (int k = 0; k < K; k++)
                         sum += Math.exp(mu[s][d][k]);
-                    for(int k = 0; k < K; k ++)
+                    for (int k = 0; k < K; k++)
                         writer.print(Double.toString(Math.exp(mu[s][d][k]) / sum) + " ");
                     writer.println();
                 }
@@ -240,6 +257,8 @@ public class DbLDA {
             state[i] = xp;
             xa = xp - (xp / 2.0 + Math.log(xp) - Math.log(zeta[s][d])  + Math.log(4.0 * (double)doc_word_slice[s][d + 1])
                     + mu[s][d][k]) / (1 / xp + 0.5);
+
+            //Error
             if(xa < 0 || xa != xa) {
                 System.out.println("Error occur when updating sigma!..");
                 System.out.format("xa:%f xp:%f zeta[s][d]:%f mu[s][d][k]:%f doc_word_slice[s][d + 1]:%d \n", xa, xp, zeta[s][d], mu[s][d][k], doc_word_slice[s][d + 1]);
@@ -247,6 +266,7 @@ public class DbLDA {
                     System.out.format("%.10f ", state[j]);
                 System.exit(0);
             }
+
             xp = xa;
         }
         return Math.sqrt(xp);
@@ -255,23 +275,55 @@ public class DbLDA {
     private double[][] computePhi() {
         double[][] res = new double[K][V];
         for(int k = 0; k < K; k ++) {
+            double sum = 0;
             for (int v = 0; v < V; v++) {
                 res[k][v] = (Beta + mean_nkw[k][v]) / (V * Beta + mean_nkd[k]);
+                sum += res[k][v];
+            }
+
+            //Error
+            if(Math.abs(sum - 1) > 0.01) {
+                System.out.format("Error occurred on Phi with sum: %.10f \n", sum);
+                double temp1 = 0;
+                for(int s = 0; s < V; s ++) {
+                    temp1 += mean_nkw[k][s];
+                }
+                System.out.format("sum: %.10f  mean_nkd: %.10f \n", temp1, mean_nkd[k]);
+                System.exit(0);
             }
         }
         return res;
     }
 
     private double evaluate(double[][] pre_phi) {
-        //compute update
-        double[][] new_phi = computePhi();
-        double diff = 0;
+        //compute difference for phi
+//        double[][] new_phi = computePhi();
+//        double diff = 0;
+//
+//        for(int k = 0; k < K; k ++)
+//            for(int v = 0; v < V; v ++) {
+//                diff += Math.abs(new_phi[k][v] - pre_phi[k][v]);
+//            }
+//        return diff;
 
-        for(int k = 0; k < K; k ++)
-            for(int v = 0; v < V; v ++) {
-                diff += Math.abs(new_phi[k][v] - pre_phi[k][v]);
+        //compute partial ELBO
+        double ELBO_mu = 0;
+        for(int s = 0; s < S; s ++) {
+            for(int d = 0; d < doc_word_slice[s][0]; d ++) {
+                double sum_mu = 0;
+                for(int k = 0; k < K; k ++) {
+                    ELBO_mu += (Alpha - 1) * mu[s][d][k];
+                    sum_mu += Math.exp(mu[s][d][k] + sigma[s][d][k] / 2.0);
+                }
+                for(int n = 0; n < doc_word_slice[s][d + 1]; n ++) {
+                    for(int k = 0; k < K ; k ++) {
+                        ELBO_mu += gamma[s][d][n][k] * mu[s][d][k];
+                    }
+                }
+                ELBO_mu += doc_word_slice[s][d + 1] * (- 1/zeta[s][d] * sum_mu);
             }
-        return diff;
+        }
+        return ELBO_mu;
     }
 
     public int getCurrentIterateCount() {
