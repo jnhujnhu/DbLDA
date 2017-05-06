@@ -68,8 +68,8 @@ public class Perplexity {
             String[] word_temp = scanner.nextLine().split(" ");
             doc_length[doc_no] = word_temp.length - 1;
 
-            //total_word += Math.floor(doc_length[doc_no] * doc_percent);
-            total_word += doc_length[doc_no];
+            total_word += Math.floor(doc_length[doc_no] * doc_percent);
+            //total_word += doc_length[doc_no];
             for(int j = 1; j < word_temp.length; j ++)
                 word[doc_no][j - 1] = wordmap.get(word_temp[j]);
             doc_no ++;
@@ -82,8 +82,8 @@ public class Perplexity {
         double log_sum = 0;
         for(int i = 0; i < D; i ++) {
 
-            //for(int j = (int) Math.floor(doc_length[i] * doc_percent); j < doc_length[i]; j ++) {
-            for(int j = 0; j < doc_length[i]; j ++) {
+            for(int j = (int) Math.floor(doc_length[i] * doc_percent); j < doc_length[i]; j ++) {
+            //for(int j = 0; j < doc_length[i]; j ++) {
                 double temp_ = 0;
                 for(int k = 0; k < K; k ++) {
                     temp_ += theta[i][k] * phi[k][word[i][j] - 1];

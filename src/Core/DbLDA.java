@@ -35,13 +35,16 @@ public class DbLDA {
 
     private double[][] Phi = null;
 
-    public DbLDA(double alpha, double beta, double sigma, int K, int sliceLen, String outputDir) {
+    private String label;
+
+    public DbLDA(double alpha, double beta, double sigma, int K, int sliceLen, String outputDir, String Label) {
         this.Alpha = alpha;
         this.Beta = beta;
         this.Sigma = sigma;
         this.K = K;
         this.SliceLen = sliceLen;
         this.outputDir = outputDir;
+        this.label = Label;
         wordMap = new HashMap<>();
         V = 0;
     }
@@ -51,7 +54,7 @@ public class DbLDA {
         BufferedReader input = new BufferedReader(new InputStreamReader(new FileInputStream(new File(wordMapPath))));
         Scanner scanner = new Scanner(input);
         V = Integer.parseInt(scanner.nextLine()); //word map No.
-        while(scanner.hasNextLine()) {
+        while (scanner.hasNextLine()) {
             String[] temp = scanner.nextLine().split(" ");
             wordMap.put(temp[0], Integer.parseInt(temp[1]));
         }
@@ -77,13 +80,13 @@ public class DbLDA {
         mD = Integer.parseInt(temp[2]); //max doc per slice
         mN = (int) Math.floor(Integer.parseInt(temp[3]) * doc_percent); //max word per doc
 
-        //init variational parameters
-        mu = new double[S][mD][K];
-        zeta = new double[S][mD];
-        sigma = new double[S][mD][K];
-        gamma = new double[S][mD][mN][K];
+        //init variational parameters.
+        mu = new double[S][][];
+        zeta = new double[S][];
+        sigma = new double[S][][];  //sigma-----deviation(NOT standard deviation)
+        gamma = new double[S][][][];
 
-        word = new int[S][mD][mN];
+        word = new int[S][][];
         doc_word_slice = new int[S][mD + 1];
         mean_nkd = new double[K];
         mean_nkw = new double[K][V];
@@ -94,6 +97,7 @@ public class DbLDA {
             int temp_slice = Integer.parseInt(temp_doc[0]) - first_timeslice;
             int doc_length = (int) Math.floor((temp_doc.length - 1) * doc_percent);
 
+            //doc_word_slice[s][0]:D_s  doc_word_slice[s][d + 1]:N_sd
             doc_word_slice[temp_slice][0]++;
             doc_word_slice[temp_slice][doc_word_slice[temp_slice][0]] = doc_length;
 
@@ -102,6 +106,17 @@ public class DbLDA {
             }
         }
         scanner.close();
+
+        //init matrix
+        for(int s = 0; s < S; s ++) {
+            mu[s] = new double[doc_word_slice[s][0]][K];
+            zeta[s] = new double[doc_word_slice[s][0]];
+            sigma[s] = new double[doc_word_slice[s][0]][K];
+            for(int d = 0; d < doc_word_slice[s][0]; d ++) {
+                gamma[s] = new double[doc_word_slice[s][0]][doc_word_slice[s][d + 1]][K];
+                word[s] = new int[doc_word_slice[s][0]][doc_word_slice[s][d + 1]];
+            }
+        }
 
         //random initialize parameters
         for(int s = 0; s < S; s ++) {
@@ -118,9 +133,10 @@ public class DbLDA {
                 }
                 //init mu
                 mu[s][d] = Sampler.getGaussianSample(K, theta, b_sigma);
+
                 //init sigma
                 for(int k1 = 0; k1 < K; k1 ++)
-                    sigma[s][d][k1] = new Random().nextDouble() * 0.1 + 0.0001;
+                    sigma[s][d][k1] = new Random().nextDouble() * 0.4 + 0.5001;
                 for(int n = 0; n < doc_word_slice[s][d + 1]; n ++) {
                     //init gamma
                     gamma[s][d][n] = Sampler.getGaussianSample(K, mu[s][d], sigma[s][d]);
@@ -149,32 +165,31 @@ public class DbLDA {
     }
 
     public boolean iterateVariationalUpdate() throws Exception {
-        iter_No ++;
-        //double[][] prev_phi = computePhi();
-        double prev_ELBO = evaluate(null);
-        for(int i = 0; i < S; i ++)
-            for(int j = 0;j < doc_word_slice[i][0]; j ++) {
+        iter_No++;
+        double[][] prev_phi = computePhi();
+        //double prev_ELBO = evaluate(null);
+        for (int i = 0; i < S; i++) {
+            for (int j = 0; j < doc_word_slice[i][0]; j++) {
                 double[] sum_gamma = new double[K];
                 for (int n = 0; n < doc_word_slice[i][j + 1]; n++) {
                     //update gamma
                     double norm = 0;
                     double[] prev_gamma = new double[K];
 
-                    for (int k = 0; k < K; k ++) {
+                    for (int k = 0; k < K; k++) {
                         prev_gamma[k] = gamma[i][j][n][k];
-                        if(Phi == null) {
+                        if (Phi == null) {
                             gamma[i][j][n][k] = (Beta + mean_count_gamma(i, j, n, k, word[i][j][n])) * Math.exp(mu[i][j][k])
                                     / (V * Beta + mean_count_gamma(i, j, n, k, 0));
-                        }
-                        else {
+                        } else {
                             assert Phi != null;
-                            gamma[i][j][n][k] =  Phi[k][word[i][j][n] - 1] * Math.exp(mu[i][j][k]);
+                            gamma[i][j][n][k] = Phi[k][word[i][j][n] - 1] * Math.exp(mu[i][j][k]);
                         }
                         norm += gamma[i][j][n][k];
                     }
                     ErrorHandler.catchNaNError(K, gamma[i][j][n], "Gamma");
 
-                    for (int k = 0; k < K; k ++) {
+                    for (int k = 0; k < K; k++) {
                         gamma[i][j][n][k] /= norm;
                         sum_gamma[k] += gamma[i][j][n][k];
                         //maintain mean_nkw mean_nkd
@@ -183,14 +198,21 @@ public class DbLDA {
                     }
                 }
 
-                //update mu
-                for(int k = 0; k < K; k ++) {
-                    mu[i][j][k] = Math.log(zeta[i][j] / (double) doc_word_slice[i][j + 1] * ((Alpha - 1) + sum_gamma[k]))
-                            - sigma[i][j][k] / 2.0;
+                //update mu using Newton's method
+                for (int k = 0; k < K; k++) {
+                    double sum_mu = 0;
+                    for (int d = 0; d < doc_word_slice[i][0]; d++)
+                        if (d != j)
+                            sum_mu += mu[i][d][k];
+                    double Const = (Alpha - 1) / (double) doc_word_slice[i][0] + sum_gamma[k]
+                            + sum_mu / ((double) doc_word_slice[i][0] * Sigma);
+
+                    mu[i][j][k] = NewtonsMethodforMu(i, j, k, 1, 8, Const);
 
                     //-Infinity Error
                     if (mu[i][j][k] == Double.NEGATIVE_INFINITY) {
-                        System.out.format("zeta[i][j]:%.10f doc_word_slice:%d sum_gamma:%.10f sigma:%.10f", zeta[i][j], doc_word_slice[i][j + 1]
+                        System.out.format("zeta[i][j]:%.10f doc_word_slice:%d sum_gamma:%.10f sigma:%.10f", zeta[i][j]
+                                , doc_word_slice[i][j + 1]
                                 , sum_gamma[k], sigma[i][j][k]);
                         System.out.println();
                         System.exit(0);
@@ -199,27 +221,29 @@ public class DbLDA {
                 ErrorHandler.catchNaNError(K, mu[i][j], "Mu");
 
                 //update sigma using Newton's method
-                for(int k = 0; k < K; k ++) {
-                    sigma[i][j][k] = NewtonsMethodforSigma(i, j, k, 0.0001, 5);
+                for (int k = 0; k < K; k++) {
+                    sigma[i][j][k] = NewtonsMethodforSigma(i, j, k, 0.00001, 5);
                 }
                 ErrorHandler.catchNaNError(K, sigma[i][j], "Sigma");
 
                 //update zeta
                 double temp_zeta = 0;
-                for(int k = 0; k < K; k ++)
+                for (int k = 0; k < K; k++)
                     temp_zeta += Math.exp(mu[i][j][k] + sigma[i][j][k] / 2.0);
                 zeta[i][j] = temp_zeta;
                 ErrorHandler.catchNaNError(doc_word_slice[i][0], zeta[i], "Zeta");
             }
+        }
 
-        double diff = evaluate(null) - prev_ELBO;
-        System.out.println("Iterating... No: " + iter_No + "  with diff on ELBO: " + Double.toString(diff));
+        double diff = evaluate(prev_phi);
+        System.out.println("Iterating... No: " + iter_No + "  with diff on Phi: " + Double.toString(diff));
 
         //store phi
-        storePhi();
-        storeThetap_normed();
-        if(iter_No == 500) {
+        //storePhi();
+        //storeThetap_normed();
+        if (iter_No == 500) {
             //store thetap
+            //storePhi();
             storeThetap_normed();
             System.exit(0);
         }
@@ -237,7 +261,7 @@ public class DbLDA {
     }
 
     private void storeThetap_normed() throws Exception {
-        PrintWriter writer = new PrintWriter(outputDir + "model_iter_" + iter_No + ".thetap", "UTF-8");
+        PrintWriter writer = new PrintWriter(outputDir + "model_iter_" + label + ".thetap", "UTF-8");
             for(int s = 0; s < S; s ++)
                 for(int d = 0; d < doc_word_slice[s][0]; d ++) {
                     double sum = 0;
@@ -253,15 +277,18 @@ public class DbLDA {
     private double NewtonsMethodforSigma(int s, int d, int k, double x0, int step) {
         double xp = x0, xa;
         double[] state = new double[step];
+        double Const = (1.0 - (double) doc_word_slice[s][0]) / (2.0 * (double) doc_word_slice[s][0] * Sigma);
         for(int i = 0; i < step; i ++) {
             state[i] = xp;
-            xa = xp - (xp / 2.0 + Math.log(xp) - Math.log(zeta[s][d])  + Math.log(4.0 * (double)doc_word_slice[s][d + 1])
-                    + mu[s][d][k]) / (1 / xp + 0.5);
+            xa = xp - (Math.log(zeta[s][d]) - Math.log(4 * doc_word_slice[s][d + 1])
+                    + Math.log(2.0 * Const + 1.0 / xp) - xp / 2.0 - mu[s][d][k])
+                / (- 1.0 / (2 * Const * xp * xp + xp) - 0.5);
 
             //Error
             if(xa < 0 || xa != xa) {
                 System.out.println("Error occur when updating sigma!..");
-                System.out.format("xa:%f xp:%f zeta[s][d]:%f mu[s][d][k]:%f doc_word_slice[s][d + 1]:%d \n", xa, xp, zeta[s][d], mu[s][d][k], doc_word_slice[s][d + 1]);
+                System.out.format("xa:%f xp:%f zeta[s][d]:%f mu[s][d][k]:%f Const:%f doc_word_slice[s][d + 1]:%d \n", xa, xp
+                        , zeta[s][d], mu[s][d][k], Const, doc_word_slice[s][d + 1]);
                 for(int j = 0; j <= i; j ++)
                     System.out.format("%.10f ", state[j]);
                 System.exit(0);
@@ -269,7 +296,44 @@ public class DbLDA {
 
             xp = xa;
         }
-        return Math.sqrt(xp);
+        return xp;
+    }
+
+    private double NewtonsMethodforMu(int s, int d, int k, double x0, int step, double Const) {
+        //fix the crash(two cases) when exp{..} is too large or log{negative}
+        boolean method_flag = true;
+        if(Const + (1.0 - (double) doc_word_slice[s][0]) / (double) doc_word_slice[s][0] * x0 < 0) {
+            method_flag = false;
+        }
+        double xp = x0, xa;
+        double[] state = new double[step];
+        for(int i = 0; i < step; i ++) {
+            state[i] = xp;
+            if(method_flag) {
+                xa = xp - (Math.log(Const + (1.0 - (double) doc_word_slice[s][0]) / (double) doc_word_slice[s][0] * xp)
+                        + Math.log(zeta[s][d]) - Math.log(doc_word_slice[s][d + 1]) - xp - sigma[s][d][k] / 2.0)
+                        / ((1.0 - (double) doc_word_slice[s][0]) / ((double) doc_word_slice[s][0] * Const
+                        + (1.0 - (double) doc_word_slice[s][0]) * xp) - 1.0);
+            }
+            else {
+                double exp_temp = (double) doc_word_slice[s][d + 1] / zeta[s][d] * Math.exp(xp + sigma[s][d][k] / 2.0);
+                xa = xp - (Const + (1.0 - (double) doc_word_slice[s][0]) / (double) doc_word_slice[s][0] * xp
+                                 - exp_temp)
+                        / ((1.0 - (double) doc_word_slice[s][0]) / (double) doc_word_slice[s][0]
+                                - exp_temp);
+            }
+            //Error
+            if(xa != xa) {
+                System.out.println("Error occur when updating mu!..");
+                System.out.format("xa:%f xp:%f Const:%f sigma[s][d][k]:%.20f zeta[s][d]:%.20f doc_word_slice[s][0]:%d doc_word_slice[s][d + 1]:%d \n"
+                        , xa, xp, Const, sigma[s][d][k], zeta[s][d], doc_word_slice[s][0], doc_word_slice[s][d + 1]);
+                for(int j = 0; j <= i; j ++)
+                    System.out.format("%.10f ", state[j]);
+                System.exit(0);
+            }
+            xp = xa;
+        }
+        return xp;
     }
 
     private double[][] computePhi() {
@@ -297,33 +361,43 @@ public class DbLDA {
 
     private double evaluate(double[][] pre_phi) {
         //compute difference for phi
-//        double[][] new_phi = computePhi();
-//        double diff = 0;
-//
-//        for(int k = 0; k < K; k ++)
-//            for(int v = 0; v < V; v ++) {
-//                diff += Math.abs(new_phi[k][v] - pre_phi[k][v]);
-//            }
-//        return diff;
+        double[][] new_phi = computePhi();
+        double diff = 0;
+
+        for(int k = 0; k < K; k ++)
+            for(int v = 0; v < V; v ++) {
+                diff += Math.abs(new_phi[k][v] - pre_phi[k][v]);
+            }
+        return diff;
 
         //compute partial ELBO
-        double ELBO_mu = 0;
-        for(int s = 0; s < S; s ++) {
-            for(int d = 0; d < doc_word_slice[s][0]; d ++) {
-                double sum_mu = 0;
-                for(int k = 0; k < K; k ++) {
-                    ELBO_mu += (Alpha - 1) * mu[s][d][k];
-                    sum_mu += Math.exp(mu[s][d][k] + sigma[s][d][k] / 2.0);
-                }
-                for(int n = 0; n < doc_word_slice[s][d + 1]; n ++) {
-                    for(int k = 0; k < K ; k ++) {
-                        ELBO_mu += gamma[s][d][n][k] * mu[s][d][k];
-                    }
-                }
-                ELBO_mu += doc_word_slice[s][d + 1] * (- 1/zeta[s][d] * sum_mu);
-            }
-        }
-        return ELBO_mu;
+//        double ELBO_mu = 0;
+//        for(int s = 0; s < S; s ++) {
+//            for(int d = 0; d < doc_word_slice[s][0]; d ++) {
+//                double sum_mu = 0;
+//                for(int k = 0; k < K; k ++) {
+//                    sum_mu += Math.exp(mu[s][d][k] + sigma[s][d][k] / 2.0);
+//                }
+//                for(int n = 0; n < doc_word_slice[s][d + 1]; n ++) {
+//                    for(int k = 0; k < K ; k ++) {
+//                        ELBO_mu += gamma[s][d][n][k] * mu[s][d][k];
+//                        System.out.println(ELBO_mu);
+//                        if(ELBO_mu != ELBO_mu) {
+//                            for(int i = 0; i < K; i ++)
+//                                System.out.format("%.10f ", gamma[s][d][n][i]);
+//                            System.out.println();
+//                            for(int i = 0; i < K; i ++)
+//                                System.out.format("%.10f ", mu[s][d][i]);
+//
+//                            System.exit(0);
+//                        }
+//                    }
+//                }
+//                ELBO_mu += doc_word_slice[s][d + 1] * (- 1/zeta[s][d] * sum_mu);
+//
+//            }
+//        }
+//        return ELBO_mu;
     }
 
     public int getCurrentIterateCount() {
