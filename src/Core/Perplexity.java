@@ -67,8 +67,7 @@ public class Perplexity {
         while(scanner.hasNextLine()) {
             String[] word_temp = scanner.nextLine().split(" ");
             doc_length[doc_no] = word_temp.length - 1;
-
-            total_word += Math.floor(doc_length[doc_no] * doc_percent);
+            total_word += Math.floor(doc_length[doc_no] * (1 - doc_percent));
             //total_word += doc_length[doc_no];
             for(int j = 1; j < word_temp.length; j ++)
                 word[doc_no][j - 1] = wordmap.get(word_temp[j]);
